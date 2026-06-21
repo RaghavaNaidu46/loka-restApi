@@ -1,5 +1,6 @@
 import re
 import io
+# pyrefly: ignore [missing-import]
 import easyocr
 import logging
 from typing import Tuple, Optional, List
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 _reader = None
 
 # Minimum confidence score to accept an OCR result
-_OCR_MIN_CONFIDENCE = 0.30
+_OCR_MIN_CONFIDENCE = 0.20
 
 
 def getOcrReader() -> easyocr.Reader:
@@ -286,24 +287,23 @@ def parseDobFromLine(line: str) -> Optional[str]:
         beforeDigits = re.sub(r'\D', '', searchText[:yearMatch.start()])
 
         day, month = None, None
-        length = len(beforeDigits)
-
-        if length == 4:
-            # DDMM
-            day, month = beforeDigits[:2], beforeDigits[2:]
-        elif length == 3:
-            # DDM or DMM
-            d1, m1 = beforeDigits[:2], beforeDigits[2:]
-            d2, m2 = beforeDigits[:1], beforeDigits[1:]
-            if 1 <= int(d1) <= 31 and 1 <= int(m1) <= 12:
-                day, month = d1, m1
-            elif 1 <= int(d2) <= 31 and 1 <= int(m2) <= 12:
-                day, month = d2, m2
-        elif length >= 5:
-            # OCR absorb separator e.g. "10006" → day=10, month=06
-            d, m = beforeDigits[:2], beforeDigits[-2:]
-            if 1 <= int(d) <= 31 and 1 <= int(m) <= 12:
-                day, month = d, m
+        
+        # Scan for a valid day and month in beforeDigits
+        for d_len in (2, 1):
+            for m_len in (2, 1):
+                if day is not None and month is not None:
+                    break
+                for i in range(len(beforeDigits) - d_len - m_len + 1):
+                    day_val = beforeDigits[i : i + d_len]
+                    if not (1 <= int(day_val) <= 31):
+                        continue
+                    for j in range(i + d_len, len(beforeDigits) - m_len + 1):
+                        month_val = beforeDigits[j : j + m_len]
+                        if 1 <= int(month_val) <= 12:
+                            day, month = day_val, month_val
+                            break
+                    if day is not None:
+                        break
 
         if day and month:
             return f"{day.zfill(2)}/{month.zfill(2)}/{year}"
