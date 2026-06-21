@@ -31,3 +31,21 @@ def decodeToken(token: str) -> Optional[dict]:
         return payload
     except JWTError:
         return None
+
+
+import bcrypt
+
+
+def hashPassword(password: str) -> str:
+    password_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
+
+
+def verifyPassword(plainPassword: str, hashedPassword: str) -> bool:
+    try:
+        return bcrypt.checkpw(plainPassword.encode('utf-8'), hashedPassword.encode('utf-8'))
+    except Exception:
+        return False
+

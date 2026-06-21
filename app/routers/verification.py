@@ -151,50 +151,91 @@ async def uploadAadhaarCard(
     frontImage: UploadFile = File(...),
     backImage: UploadFile = File(...),
 ):
+    try:
+        with open("app_requests.log", "a") as f:
+            f.write(f"[{datetime.now()}] upload-card: Received request from citizen {citizen.id}\n")
+    except Exception:
+        pass
+
     if citizen.verificationStatus == VerificationStatus.verified:
         return {"message": "Citizen is already verified. Status: verified."}
 
-    frontBytes = await frontImage.read()
-    backBytes = await backImage.read()
-    if len(frontBytes) == 0 or len(backBytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded images cannot be empty")
+    try:
+        frontBytes = await frontImage.read()
+        backBytes = await backImage.read()
+        if len(frontBytes) == 0 or len(backBytes) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded images cannot be empty")
 
-    from app.core.config import settings
-    from app.services.ocr_service import extractAadhaarDetails
+        from app.core.config import settings
+        from app.services.ocr_service import extractAadhaarDetails
 
-    # Extract name, dob, address, and Aadhaar number via EasyOCR
-    name, dob, address, aadhaarNumber = extractAadhaarDetails(frontBytes, backBytes)
+        # Extract name, dob, address, and Aadhaar number via EasyOCR
+        name, dob, address, aadhaarNumber = extractAadhaarDetails(frontBytes, backBytes)
 
-    # Field-level clarity check — report exactly which fields could not be read
-    missingFields = []
-    if not name:
-        missingFields.append("Name")
-    if not dob:
-        missingFields.append("Date of Birth")
-    if not address:
-        missingFields.append("Address")
-    if not aadhaarNumber:
-        missingFields.append("Aadhaar Number")
+        # Field-level clarity check — report exactly which fields could not be read
+        missingFields = []
+        if not name:
+            missingFields.append("Name")
+        if not dob:
+            missingFields.append("Date of Birth")
+        if not address:
+            missingFields.append("Address")
+        if not aadhaarNumber:
+            missingFields.append("Aadhaar Number")
 
-    if missingFields:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Could not read: {', '.join(missingFields)}. Please upload a clearer photo of your Aadhaar card."
+        if missingFields:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not read: {', '.join(missingFields)}. Please upload a clearer photo of your Aadhaar card."
+            )
+
+        # Aadhaar deduplication: reject if already linked to another account
+        existingResult = await db.execute(
+            select(Citizen)
+            .where(Citizen.aadhaarNumber == aadhaarNumber)
+            .where(Citizen.id != citizen.id)
         )
+        if existingResult.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This Aadhaar card is already linked to another account."
+            )
 
-    # Aadhaar deduplication: reject if already linked to another account
-    existingResult = await db.execute(
-        select(Citizen)
-        .where(Citizen.aadhaarNumber == aadhaarNumber)
-        .where(Citizen.id != citizen.id)
-    )
-    if existingResult.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This Aadhaar card is already linked to another account."
-        )
+        if settings.mockVerification:
+            record = VerificationRecord(
+                citizenId=citizen.id,
+                status=VerificationRecordStatus.valid,
+                uidaiRef=f"CARD-{uuid.uuid4()}",
+                verifiedAt=datetime.now(timezone.utc),
+            )
+            db.add(record)
+            await db.execute(
+                update(Citizen)
+                .where(Citizen.id == citizen.id)
+                .values(
+                    verificationStatus=VerificationStatus.verified,
+                    originalName=name,
+                    dateOfBirth=dob,
+                    address=address,
+                    aadhaarNumber=aadhaarNumber,
+                )
+            )
+            await db.commit()
+            res = {
+                "message": "Verification card successful. Status: verified.",
+                "mockMode": True,
+                "extractedData": {
+                    "originalName": name,
+                    "dateOfBirth": dob,
+                    "address": address,
+                    "aadhaarNumber": aadhaarNumber
+                }
+            }
+            with open("app_requests.log", "a") as f:
+                f.write(f"[{datetime.now()}] upload-card: Success (mockMode=True)\n")
+            return res
 
-    if settings.mockVerification:
+        # Production OCR flow
         record = VerificationRecord(
             citizenId=citizen.id,
             status=VerificationRecordStatus.valid,
@@ -214,9 +255,8 @@ async def uploadAadhaarCard(
             )
         )
         await db.commit()
-        return {
-            "message": "Verification card successful. Status: verified.",
-            "mockMode": True,
+        res = {
+            "message": "Aadhaar Card processed successfully. Status: verified.",
             "extractedData": {
                 "originalName": name,
                 "dateOfBirth": dob,
@@ -224,36 +264,19 @@ async def uploadAadhaarCard(
                 "aadhaarNumber": aadhaarNumber
             }
         }
-
-    # Production OCR flow
-    record = VerificationRecord(
-        citizenId=citizen.id,
-        status=VerificationRecordStatus.valid,
-        uidaiRef=f"CARD-{uuid.uuid4()}",
-        verifiedAt=datetime.now(timezone.utc),
-    )
-    db.add(record)
-    await db.execute(
-        update(Citizen)
-        .where(Citizen.id == citizen.id)
-        .values(
-            verificationStatus=VerificationStatus.verified,
-            originalName=name,
-            dateOfBirth=dob,
-            address=address,
-            aadhaarNumber=aadhaarNumber,
-        )
-    )
-    await db.commit()
-    return {
-        "message": "Aadhaar Card processed successfully. Status: verified.",
-        "extractedData": {
-            "originalName": name,
-            "dateOfBirth": dob,
-            "address": address,
-            "aadhaarNumber": aadhaarNumber
-        }
-    }
+        with open("app_requests.log", "a") as f:
+            f.write(f"[{datetime.now()}] upload-card: Success (Production)\n")
+        return res
+    except HTTPException as he:
+        with open("app_requests.log", "a") as f:
+            f.write(f"[{datetime.now()}] upload-card: HTTPException {he.status_code} - {he.detail}\n")
+        raise he
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        with open("app_requests.log", "a") as f:
+            f.write(f"[{datetime.now()}] upload-card: Internal Error - {str(e)}\n{tb}\n")
+        raise e
 
 
 @router.get("/status", summary="Get citizen's current verification status")

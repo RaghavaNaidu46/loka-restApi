@@ -1,10 +1,10 @@
 Front Lines:
-['HRT WGT', 'Govemment of India', '3Mar', '38 e83s', 'Terli Aravind', '4087', '1', '36o 84 /DOB: 10006/2001', '1', 'Joad', 'I Male', '1', '9401 8251 4730', 'TT', 'HeR ,', 'T', '4JTt']
+['Terli Aravind', '1', 'Jao 38 /DOB: 1006/2001', '1', 'Jona', 'I Mak', '9401 8251 4730']
 
 Back Lines:
-['HRcry fafeiez 46Ular grfer fruf', 'Unique Identification Authority of India', 'AadhaAR', 'adoj: S/O', "'err2n, 9-'a9,Dodsaq,", '30ns5q,5je6 36, %5p0, Cgoigy"', '06 , 532461', 'I', '8', 'Address: SIO Thatababu; 2-452,', 'Main', 'Veedhi; Main Veedhi; V V R', '1', 'Srikakulam, Andhra Pradesh, 532461', '9401 8251 4730', '1947', 'help@uidai gov.in', 'WWw.uidal govin', '25""', 'peta,']
+['Unlqua Idantliloatlon Authority Of India', 'AadhaaR', '065, 532461', '8', 'Address: S/O Thatababu, 2-452 , Main', 'Veedhi; Main Veedhi;, V V R', '} Seeakulana, Andhra Pradesh, 632461', '9401 8251 4730', '278', '1947', 'help@uldal.gov In', 'www.uidal govin', 'peta']
 
 Parsed Name: Terli Aravind
 Parsed DOB: 10/06/2001
-Parsed Address: SIO Thatababu; 2-452, Main, Veedhi; Main Veedhi; V V R, 1, Srikakulam, Andhra Pradesh, 532461
+Parsed Address: S/O Thatababu, 2-452 , Main, Veedhi, Main Veedhi, V V R, } Seeakulana, Andhra Pradesh, 632461
 Parsed Aadhaar Number: 9401 8251 4730
