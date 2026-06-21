@@ -1,0 +1,109 @@
+# Robust Verification Engine — Implementation Plan
+
+## Goal
+Harden the Aadhaar card verification pipeline end-to-end so it handles real-world OCR noise, poor image quality, and edge cases gracefully — across the backend Python OCR service, the FastAPI endpoint, and the Android client.
+
+---
+
+## Identified Weaknesses
+
+| Area | Issue |
+|---|---|
+| **OCR — Image Quality** | Raw bytes sent to EasyOCR as-is; no preprocessing (resize, contrast, denoise) |
+| **OCR — Aadhaar Number** | Multi-line split Aadhaar (e.g. `9401 8251` on one line, `4730` on next) may not be caught |
+| **OCR — Name** | Single-word names, or names with initials (e.g. "K. Aravind") are filtered out |
+| **OCR — Address** | Semicolons used as commas; `SIO` instead of `S/O` not normalized |
+| **OCR — Language noise** | Telugu/Hindi Unicode text in OCR lines causes noise during text matching |
+| **Confidence Filtering** | All EasyOCR results accepted regardless of confidence score |
+| **Backend — Clarity check** | All 4 fields must be present; no partial-success or field-level error messages |
+| **Backend — Deduplication** | Same Aadhaar number can be used to verify multiple accounts |
+| **Backend — Retry logic** | No partial-retry: if OCR fails, the whole request fails |
+| **Android — Error messages** | Generic `"Verification could not be completed."` shown; no actionable guidance |
+| **Android — Image capture** | User picks from gallery only; no in-app camera capture option |
+| **Debug artifacts** | `front_debug.jpg`, `back_debug.jpg`, `ocr_debug.txt` left on disk in production |
+
+---
+
+## Proposed Changes
+
+### Backend — `ocr_service.py`
+
+#### [MODIFY] [ocr_service.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/services/ocr_service.py)
+
+1. **Confidence filtering**: Skip EasyOCR results with confidence < 0.3 to eliminate noise.
+2. **Filter non-Latin characters**: Strip lines that are predominantly non-ASCII (Telugu/Hindi script) before parsing.
+3. **Image preprocessing with Pillow**: Before passing bytes to EasyOCR, apply:
+   - Resize to minimum 1000px wide (upscale small images)
+   - Convert to grayscale
+   - Apply contrast enhancement (ImageEnhance.Contrast)
+   - Apply sharpening (ImageFilter.SHARPEN)
+4. **Aadhaar Number — multi-line joining**: Scan across **all lines joined** as a single string for `XXXX XXXX XXXX` pattern. Also handle 4-4-4 split across adjacent lines by combining window of 2 lines.
+5. **Name — single-word & initial support**: Accept names with 1 word >= 3 chars, or names with initials (e.g. `K. Aravind`).
+6. **Address — normalize separators**: Replace `;` with `,` in address parts. Normalize `SIO` → `S/O`, `WIO` → `W/O`.
+7. **Remove debug file writing from production path**: Return a structured `OcrResult` dataclass instead of writing files. Keep debug writing only if `settings.debugOcr = True`.
+
+---
+
+### Backend — `verification.py`
+
+#### [MODIFY] [verification.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/routers/verification.py)
+
+1. **Field-level error messages**: Instead of a generic "unable to read" error, return which specific fields are missing:
+   ```json
+   {
+     "detail": "Could not read: Date of Birth, Aadhaar Number. Please upload a clearer photo."
+   }
+   ```
+2. **Aadhaar deduplication check**: Before saving, query DB for an existing citizen with the same `aadhaarNumber`. If found, reject with `HTTP 409 Conflict`:
+   ```json
+   { "detail": "This Aadhaar card is already linked to another account." }
+   ```
+3. **Remove hardcoded fallback values**: Lines like `result.name or "Aravind Terli"` and `result.dob or "15/08/1995"` must be removed — they produce fake data on failures.
+
+---
+
+### Backend — `config.py` (settings)
+
+#### [MODIFY] [config.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/core/config.py)
+
+- Add `debugOcr: bool = False` setting controlled by env var `DEBUG_OCR`.
+
+---
+
+### Android — `BecomeCitizenViewModel.kt`
+
+#### [MODIFY] [BecomeCitizenViewModel.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/verification/BecomeCitizenViewModel.kt)
+
+1. **Parse backend error message**: Extract the `detail` field from the HTTP 422 error body and show it verbatim to the user instead of the generic message.
+
+---
+
+### Android — `RealVerificationService.kt`
+
+#### [MODIFY] [RealVerificationService.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/services/RealVerificationService.kt)
+
+1. **Propagate server error message**: On HTTP 4xx responses, read the `detail` field from the JSON error body and throw an `Exception` with that message so the ViewModel can display it.
+
+---
+
+### Android — `BecomeCitizenScreen.kt`
+
+#### [MODIFY] [BecomeCitizenScreen.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/verification/BecomeCitizenScreen.kt)
+
+1. **Camera capture option**: Add a "Take Photo" button alongside "Choose from Gallery" for each card side using `ActivityResultContracts.TakePicture`.
+2. **Image preview fills area**: Replace fixed `130.dp` height with aspect-ratio-aware display (approx 3:2 aspect ratio for ID cards).
+3. **Tips text**: Add a short tip under the upload section: _"For best results, ensure good lighting and no glare. All card text must be clearly visible."_
+
+---
+
+## Verification Plan
+
+### Automated
+- Run `.\venv\Scripts\python.exe test_ocr.py` against `front_debug.jpg` / `back_debug.jpg` to verify all fields parse correctly.
+- Run `.\gradlew compileDebugKotlin` in the Android project to confirm no Kotlin compilation errors.
+
+### Manual
+- Upload Aadhaar card images in the app and confirm:
+  - All 4 fields (name, DOB, address, Aadhaar number) are extracted and shown on Profile.
+  - A blurry or partial image shows a clear, field-specific error message.
+  - Attempting to re-verify with the same Aadhaar card shows a `409 Conflict` error.

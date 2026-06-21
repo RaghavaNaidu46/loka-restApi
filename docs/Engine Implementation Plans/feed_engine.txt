@@ -1,0 +1,104 @@
+# Feed Engine — Implementation Plan
+
+## Goal
+Transform the current basic chronological/count-sorted feed into a smart, fast, and engaging civic feed with proper ranking, pagination, tab navigation, category filters, and pull-to-refresh — end to end across backend and Android.
+
+---
+
+## Identified Weaknesses
+
+| Area | Issue |
+|---|---|
+| **Backend — Ranking** | `priority` feed sorts by raw `(supportCount + opposeCount)` — no recency decay; old popular issues stay permanently at top |
+| **Backend — N+1 queries** | Every feed endpoint does `db.refresh(issue, ["district", "creator"])` in a Python loop — one DB call per issue |
+| **Backend — No category filter** | Feed endpoints have no `category` param — users can't filter nearby/new feed by category |
+| **Backend — No `hasMore` flag** | Responses only have `items` + `count`, no `hasMore` — client can't know if more pages exist |
+| **Android — All 4 sections load sequentially** | `feedNearby()`, `feedNew()`, `feedPriority()`, `feedResolved()` all called serially in ViewModel |
+| **Android — No pull-to-refresh** | Tapping "refresh" requires navigating away and back |
+| **Android — No tab navigation on feed** | All 4 sections shown as a massive scroll; user has no way to focus on one |
+| **Android — No category filter** | No way to narrow the feed to a specific issue category (roads, water, etc.) |
+| **Android — IssueCard missing creator name** | `creatorDisplayName` is parsed but not shown on the card |
+| **Android — FeedViewModel loads once** | No refresh method exposed to the UI |
+| **Android — Error state not shown** | `state.error` is set but nothing renders it in FeedScreen |
+
+---
+
+## Proposed Changes
+
+### Backend — `feed.py`
+
+#### [MODIFY] [feed.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/routers/feed.py)
+
+1. **Eliminate N+1 queries**: Use SQLAlchemy `joinedload` on `district` and `creator` relationships so all issues are loaded in a single JOIN query.
+2. **Add `category` query param** to `/nearby` and `/new` endpoints for filtering.
+3. **Add `hasMore` to all responses**: Return `hasMore = count == limit` so the client knows if a next page exists.
+4. **Smarter `priority` ranking**: Use a Wilson score-style formula weighting recency:
+   ```
+   score = (supportCount + opposeCount) / (age_hours + 2)^0.8
+   ```
+   Computed in Python after fetching (SQLAlchemy expression-level would require raw SQL, easier in Python for now). Fetch `2×limit` rows sorted by raw count and then re-rank in Python.
+5. **Add `desiredOutcome` to serialization**: Currently missing from `serializeIssue`.
+
+---
+
+### Android — `FeedViewModel.kt`
+
+#### [MODIFY] [FeedViewModel.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/feed/FeedViewModel.kt)
+
+1. **Parallel loading with `async/await`**: Launch all 4 feed requests concurrently using `async` coroutines — reduces total load time from `4×latency` to `1×latency`.
+2. **`selectedTab` state**: Add an enum `FeedTab { Nearby, New, Priority, Resolved }` and `selectedTab` to `FeedUiState`.
+3. **`selectedCategory` filter state**: Add `selectedCategory: IssueCategory?` to state, and pass it to repository calls.
+4. **Expose `refresh()` function**: A public `refresh()` that clears state and reloads.
+5. **Proper error state**: Keep error string in state so screen can render it.
+
+---
+
+### Android — `FeedScreen.kt`
+
+#### [MODIFY] [FeedScreen.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/feed/FeedScreen.kt)
+
+1. **Tab bar**: Replace 4 stacked `section()` calls with a `TabRow` at the top (`Nearby` / `New` / `Priority` / `Resolved`). Each tab shows only its section's issues.
+2. **Pull-to-refresh**: Wrap `LazyColumn` in `SwipeRefresh` (or `PullToRefreshBox` from Material3) tied to `viewModel.refresh()`.
+3. **Category filter chips**: A horizontal scrollable row of category chips below the tab bar that filters the active tab's list.
+4. **Error banner**: Show a `Snackbar` or error card when `state.error != null`.
+5. **Loading skeleton**: While `isLoading`, show 3 placeholder shimmered cards instead of a spinner inside each section.
+
+---
+
+### Android — `IssueCard.kt`
+
+#### [MODIFY] [IssueCard.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/designsystem/IssueCard.kt)
+
+1. **Show creator name**: Add `"by <creatorDisplayName>"` below the title in a `caption` style.
+2. **Show `desiredOutcome` preview**: A 1-line clipped preview of the desired outcome below the description (when available).
+3. **Visual participation bar**: A thin colored progress bar showing `support / (support + oppose)` ratio — green for support, amber for oppose.
+
+---
+
+### Android — `IssueRepository.kt` (interface)
+
+#### [MODIFY] [IssueRepository.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/repositories/IssueRepository.kt)
+
+- Add optional `category: IssueCategory?` param to `feedNearby` and `feedNew`.
+
+---
+
+### Android — `RealIssueRepository.kt`
+
+#### [MODIFY] [RealIssueRepository.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/repositories/RealIssueRepository.kt)
+
+- Pass `category` query param to `/feed/nearby` and `/feed/new` when set.
+
+---
+
+## Verification Plan
+
+### Automated
+- `.\gradlew compileDebugKotlin` — zero errors
+
+### Manual
+- Launch app → Feed tab shows tab bar (Nearby / New / Priority / Resolved)
+- Tap each tab → shows only that section's issues
+- Tap a category chip → list filters down
+- Pull down to refresh → spinner appears, list reloads
+- Weak network: error message appears

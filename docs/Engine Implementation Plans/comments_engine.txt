@@ -1,0 +1,176 @@
+# Strongly Comments Engine — Implementation Plan
+
+This plan details the design and implementation of a robust, highly interactive, and civic-oriented comments system for Loka. The system will support threaded replies, upvoting (likes), filtering comments by citizen stance (Support, Oppose, Neutral), sorting, and visual badge markers (Creator/Official/Stance badges).
+
+## User Review Required
+
+> [!IMPORTANT]
+> Database Migration: Since we are running on PostgreSQL, we will write a new Alembic migration to add the new tables and columns (`parent_id` to `comments`, new `comment_likes` table, and new `comment_reports` table).
+> 
+> UI Styling: Comment lists will be threaded up to 1 level (replies to comments, but replies cannot have replies). This keeps the mobile interface clean and easy to navigate.
+
+---
+
+## Open Questions
+
+> [!NOTE]
+> **Stance badges**: Stance badges are computed dynamically based on the commenter's participation status for the issue. If the commenter has supported, they get a "Supported" badge. If they opposed, they get an "Opposed" badge.
+> 
+> **Official roles**: We will display the commenter's role (e.g. "official", "moderator", etc.) as a badge to elevate authoritative responses.
+
+---
+
+## Proposed Changes
+
+### Backend — Database & Models
+
+#### [NEW] [comment_like.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/models/comment_like.py)
+Create a new join table for tracking comment likes:
+```python
+import uuid
+from sqlalchemy import ForeignKey, DateTime, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import UUID
+from app.core.database import Base
+
+class CommentLike(Base):
+    __tablename__ = "comment_likes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    citizenId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("citizens.id"), nullable=False, name="citizen_id")
+    commentId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("comments.id", ondelete="CASCADE"), nullable=False, name="comment_id")
+    createdAt: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), name="created_at")
+
+    __table_args__ = (
+        UniqueConstraint("citizen_id", "comment_id", name="uq_citizen_comment_like"),
+    )
+```
+
+#### [NEW] [comment_report.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/models/comment_report.py)
+Create a new table for comment reports:
+```python
+import uuid
+from sqlalchemy import ForeignKey, DateTime, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import UUID
+from app.core.database import Base
+
+class CommentReport(Base):
+    __tablename__ = "comment_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    citizenId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("citizens.id"), nullable=False, name="citizen_id")
+    commentId: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("comments.id", ondelete="CASCADE"), nullable=False, name="comment_id")
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    createdAt: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), name="created_at")
+```
+
+#### [MODIFY] [comment.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/models/comment.py)
+1. Add `parentId` self-referential column:
+   ```python
+   parentId: Mapped[uuid.UUID | None] = mapped_column(
+       UUID(as_uuid=True), ForeignKey("comments.id", ondelete="CASCADE"), nullable=True, name="parent_id"
+   )
+   ```
+2. Define relationship for self-referential threading:
+   ```python
+   replies: Mapped[list["Comment"]] = relationship("Comment", backref="parent", remote_side="Comment.id")
+   ```
+
+#### [MODIFY] [__init__.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/models/__init__.py)
+Expose the new models `CommentLike` and `CommentReport` so SQLAlchemy/Alembic auto-discovers them.
+
+---
+
+### Backend — Schemas & Routes
+
+#### [MODIFY] [comment.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/schemas/comment.py)
+1. Add optional `parentId` to `AddCommentRequest`.
+2. Add fields to `CommentResponse`:
+   - `parentId: uuid.UUID | None`
+   - `likesCount: int`
+   - `hasLiked: bool`
+   - `stance: str | None`
+   - `authorRole: str`
+   - `isAuthor: bool`
+
+#### [MODIFY] [comments.py](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/backend/app/routers/comments.py)
+1. Update `listComments` to accept query params:
+   - `sortBy: str = Query("top")` ("top", "newest")
+   - `stance: str = Query("all")` ("all", "support", "oppose", "neutral")
+2. Modify the comments selection:
+   - Use join query fetching comment details.
+   - Count likes per comment using a subquery or outer join to `CommentLike`.
+   - Resolve `hasLiked` if the request is authenticated.
+   - Retrieve commenter's stance by outer joining `participations` on `citizenId` and `issueId`.
+   - Retrieve commenter's role (from `Citizen.role`) and whether they are the issue creator (`Comment.citizenId == Issue.creatorId`).
+3. Update `addComment` to accept and validate `parentId`.
+4. Add route `likeComment` (POST `/issues/{issueId}/comments/{commentId}/like`).
+5. Add route `unlikeComment` (DELETE `/issues/{issueId}/comments/{commentId}/like`).
+6. Add route `reportComment` (POST `/issues/{issueId}/comments/{commentId}/report`) that creates a `CommentReport`. If a comment accumulates > 3 reports, automatically mark it as hidden/moderated.
+
+---
+
+### Android — Models & Repositories
+
+#### [MODIFY] [LokaComment.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/models/LokaComment.kt)
+Add fields:
+- `parentId: String?`
+- `likesCount: Int`
+- `hasLiked: Boolean`
+- `stance: String?`
+- `authorRole: String`
+- `isAuthor: Boolean`
+
+#### [MODIFY] [CommentRepository.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/repositories/CommentRepository.kt) & [RealCommentRepository.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/repositories/RealCommentRepository.kt)
+1. Update signatures:
+   - `suspend fun list(issueId: String, sortBy: String, stance: String): List<LokaComment>`
+   - `suspend fun add(issueId: String, text: String, parentId: String?): LokaComment`
+2. Add functions:
+   - `suspend fun like(issueId: String, commentId: String)`
+   - `suspend fun unlike(issueId: String, commentId: String)`
+   - `suspend fun report(issueId: String, commentId: String, reason: String)`
+
+---
+
+### Android — ViewModels & Screens
+
+#### [MODIFY] [IssueDetailViewModel.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/issue/IssueDetailViewModel.kt)
+1. Add `commentSortBy` and `commentStance` parameters to the UI State.
+2. In `load()`, retrieve comments using the filters.
+3. Add helper actions:
+   - `setCommentSort(sortBy: String)` (re-fetches comments)
+   - `setCommentStance(stance: String)` (re-fetches comments)
+   - `likeComment(commentId: String)`
+   - `unlikeComment(commentId: String)`
+   - `addComment(text: String, parentId: String?)`
+   - `reportComment(commentId: String, reason: String)`
+
+#### [MODIFY] [IssueDetailScreen.kt](file:///c:/Users/aravi/OneDrive/Desktop/Loka/Loka/android/app/src/main/java/com/loka/app/features/issue/IssueDetailScreen.kt)
+1. Add a stance filter header above the comments (e.g. `All` / `Support` / `Oppose` chips).
+2. Add a sort menu (e.g. Toggle between `Top` and `Newest`).
+3. Build the threaded comments rendering:
+   - Group flat comments by `parentId == null` (parents) vs child comments.
+   - Indent child comments under their respective parent and render a thin vertical connecting line on the left.
+4. Render commenter info:
+   - Display a green "Supported" badge or amber "Opposed" badge based on the commenter's stance.
+   - Display an "Author" / "OP" badge if the commenter is the issue creator.
+   - Display role badges (e.g., "Official") if the commenter's role is not "citizen".
+5. Add interactive elements:
+   - Upvote button (heart/thumb up) showing the like count, filled if `hasLiked`.
+   - Reply button: sets reply target. Show a "Replying to @Username [x]" bar above the text input.
+   - Report option: Flag icon to show a simple list of reporting options.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- Run `.\gradlew compileDebugKotlin` to verify client compile.
+- Run backend verification or startup to check Alembic auto-discovery/migrations.
+
+### Manual Verification
+- View an issue. Filter comments by stance (e.g. "Oppose") and verify only opposition comments appear.
+- Post a reply to a comment. Verify it is indented under the parent.
+- Like a comment. Verify the icon turns active and count increments.
+- Report a comment and verify it is handled properly.
